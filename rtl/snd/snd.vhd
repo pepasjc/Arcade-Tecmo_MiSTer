@@ -78,7 +78,12 @@ entity snd is
     sound_rom_2_data : in byte_t;
 
     -- audio data
-    audio : out audio_t
+    audio : out audio_t;
+
+    -- RetroAchievements tap: CPU memory writes (level strobe)
+    ra_wr   : out std_logic;
+    ra_addr : out unsigned(CPU_ADDR_WIDTH-1 downto 0);
+    ra_dout : out byte_t
   );
 end entity snd;
 
@@ -125,6 +130,10 @@ architecture arch of snd is
   signal pcm_data    : nibble_t;
   signal pcm_sample  : audio_t;
 begin
+  ra_wr   <= not cpu_mreq_n and not cpu_wr_n;
+  ra_addr <= cpu_addr;
+  ra_dout <= cpu_dout;
+
   cpu : entity work.T80s
   port map (
     RESET_n     => not reset,

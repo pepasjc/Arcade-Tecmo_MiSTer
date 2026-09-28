@@ -104,7 +104,16 @@ entity tecmo is
     b : out std_logic_vector(3 downto 0);
 
     -- audio data
-    audio : out audio_t
+    audio : out audio_t;
+
+    -- RetroAchievements tap: memory writes of the main and sound CPUs
+    -- (level strobes)
+    ra_main_wr   : out std_logic;
+    ra_main_addr : out unsigned(CPU_ADDR_WIDTH-1 downto 0);
+    ra_main_dout : out byte_t;
+    ra_snd_wr    : out std_logic;
+    ra_snd_addr  : out unsigned(CPU_ADDR_WIDTH-1 downto 0);
+    ra_snd_dout  : out byte_t
   );
 end tecmo;
 
@@ -431,8 +440,16 @@ begin
     sound_rom_2_data => sound_rom_2_data,
 
     -- audio data
-    audio => audio
+    audio => audio,
+
+    ra_wr   => ra_snd_wr,
+    ra_addr => ra_snd_addr,
+    ra_dout => ra_snd_dout
   );
+
+  ra_main_wr   <= not cpu_mreq_n and not cpu_wr_n;
+  ra_main_addr <= cpu_addr;
+  ra_main_dout <= cpu_dout;
 
   -- Trigger an interrupt on the rising edge of the VBLANK signal
   --

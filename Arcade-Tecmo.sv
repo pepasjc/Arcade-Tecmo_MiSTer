@@ -223,7 +223,7 @@ assign HDMI_FREEZE = 0;
 
 `include "build_id.v"
 localparam CONF_STR = {
-  "A.Tecmo;;",
+  "RA_Tecmo;;",
   "O1,Aspect Ratio,Original,Wide;",
   "O2,Orientation,Horz,Vert;",
   "O3,Flip Screen,Off,On;",
@@ -326,7 +326,24 @@ arcade_video #(.WIDTH(256), .DW(12)) arcade_video
   .fx(status[6:4])
 );
 
-screen_rotate screen_rotate (.*);
+// The rotation framebuffer shares the DDR port with the RetroAchievements
+// mirror (see the end of the file), so its DDRAM outputs go through a mux.
+wire  [7:0] rot_burstcnt, rot_be;
+wire [28:0] rot_addr;
+wire [63:0] rot_din;
+wire        rot_we, rot_rd;
+
+screen_rotate screen_rotate
+(
+  .*,
+  .DDRAM_CLK(),
+  .DDRAM_BURSTCNT(rot_burstcnt),
+  .DDRAM_ADDR(rot_addr),
+  .DDRAM_DIN(rot_din),
+  .DDRAM_BE(rot_be),
+  .DDRAM_WE(rot_we),
+  .DDRAM_RD(rot_rd)
+);
 
 ////////////////////////////////////////////////////////////////////////////////
 // SDRAM
@@ -460,6 +477,11 @@ always @(posedge clk_sys) begin
   if (ioctl_wr && (ioctl_index == 254) && !ioctl_addr[24:3]) sw[ioctl_addr[2:0]] <= ioctl_data;
 end
 
+// RetroAchievements tap (see RETROACHIEVEMENTS below)
+wire        ra_main_wr, ra_snd_wr;
+wire [15:0] ra_main_addr, ra_snd_addr;
+wire  [7:0] ra_main_dout, ra_snd_dout;
+
 tecmo #(.CLK_FREQ(96.0)) tecmo
 (
   .reset(reset),
@@ -504,7 +526,82 @@ tecmo #(.CLK_FREQ(96.0)) tecmo
   .g(g),
   .b(b),
 
-  .audio(AUDIO_L)
+  .audio(AUDIO_L),
+
+  .ra_main_wr(ra_main_wr),
+  .ra_main_addr(ra_main_addr),
+  .ra_main_dout(ra_main_dout),
+  .ra_snd_wr(ra_snd_wr),
+  .ra_snd_addr(ra_snd_addr),
+  .ra_snd_dout(ra_snd_dout)
 );
+
+////////////////////////////  RETROACHIEVEMENTS  ////////////////////////////
+//
+// RAM mirror for the RetroAchievements fork of Main_MiSTer. The memory writes
+// of the main and sound Z80s are shadowed in BRAM (rtl/ra/ra_shadow.v, 16 kB)
+// in FinalBurn Neo's d_tecmo.cpp "All Ram" layout for rygar
+// (rtl/ra/tecmo_ra_tap.sv, byte for byte; only while the Rygar set is
+// loaded, game_index 0), and copied to DDR3 at 0x3D000000 once per frame in
+// the "RACH" layout the RA build of Main_MiSTer reads by
+// rtl/ra/ra_mirror_gather.v (from jotego's JTFRAME jtframe_ra_mirror.v).
+// ARM region table: identity { 0x0000, 0x3808, 0x0000 }.
+//
+// The only other DDR client is the optional screen rotation framebuffer
+// (screen_rotate), which ignores DDRAM_BUSY and writes one pixel per
+// CE_PIXEL while VGA_DE is high. So a copy only starts once VGA_DE has been
+// low for 4096 clocks (43 us, longer than any HBlank): the copy (~2k qwords,
+// ~50 us) then runs inside the VBlank. Held off during ROM download.
+wire        ra_wr;
+wire [12:0] ra_word;
+wire [15:0] ra_din;
+wire  [1:0] ra_be;
+
+tecmo_ra_tap ra_tap
+(
+  .clk(clk_sys),
+  .enable(game_index == 4'd0),
+  .m_wr(ra_main_wr), .m_a(ra_main_addr), .m_d(ra_main_dout),
+  .s_wr(ra_snd_wr),  .s_a(ra_snd_addr),  .s_d(ra_snd_dout),
+  .ra_wr(ra_wr), .ra_word(ra_word), .ra_din(ra_din), .ra_be(ra_be)
+);
+
+wire [10:0] ra_rd_q;
+wire [63:0] ra_q;
+ra_shadow #(.AW(14)) ra_shadow
+(
+  .clk_w(clk_sys), .wr(ra_wr), .wr_word(ra_word), .wr_din(ra_din), .wr_be(ra_be),
+  .clk_r(clk_sys), .rd_q(ra_rd_q), .q(ra_q)
+);
+
+reg [11:0] ra_de_idle = 0;
+always @(posedge clk_sys) begin
+  if (VGA_DE) ra_de_idle <= 0;
+  else if (~&ra_de_idle) ra_de_idle <= ra_de_idle + 1'd1;
+end
+
+wire [12:0] ra_rd_addr;
+wire  [7:0] ra_burstcnt, ra_ddr_be;
+wire [28:0] ra_addr;
+wire [63:0] ra_ddr_din;
+wire        ra_we, ra_active;
+assign ra_rd_q = ra_rd_addr[10:0];
+
+ra_mirror_gather #(.DW(64), .RD_LAT(1), .BLOCKS(64)) ra_mirror
+(
+  .rst(~locked), .clk(clk_sys),
+  .vblank(&ra_de_idle), .hold(ioctl_download),
+  .rd_en(), .rd_addr(ra_rd_addr), .rd_data(ra_q),
+  .ddr_we(ra_we), .ddr_busy(DDRAM_BUSY), .ddr_burstcnt(ra_burstcnt),
+  .ddr_addr(ra_addr), .ddr_be(ra_ddr_be), .ddr_din(ra_ddr_din), .active(ra_active)
+);
+
+assign DDRAM_CLK      = clk_sys;
+assign DDRAM_BURSTCNT = ra_active ? ra_burstcnt : rot_burstcnt;
+assign DDRAM_ADDR     = ra_active ? ra_addr     : rot_addr;
+assign DDRAM_DIN      = ra_active ? ra_ddr_din  : rot_din;
+assign DDRAM_BE       = ra_active ? ra_ddr_be   : rot_be;
+assign DDRAM_WE       = ra_active ? ra_we       : rot_we;
+assign DDRAM_RD       = ra_active ? 1'b0        : rot_rd;
 
 endmodule
